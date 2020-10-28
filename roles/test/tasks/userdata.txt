@@ -1,0 +1,20 @@
+#!/bin/bash
+############### CONSTANT #############
+
+IP=`/sbin/ifconfig | grep "inet"| head -n 1| cut -d: -f2 | awk {'print $2'}`
+oct4=$(echo ${IP} | tr "." " " | awk '{ print $4 }')
+InstaceID=`/usr/bin/curl -s http://169.254.169.254/latest/meta-data/instance-id`
+
+
+############ setting up hostname #######
+
+hostnamectl set-hostname "'$Test'web'$oct4'"
+
+
+
+
+##############start service ##########
+sh target/bin/webapp &
+
+
+

@@ -1,0 +1,110 @@
+---
+- name: Gather EC2 facts.
+  debug:
+    msg: System {{ test }}
+
+
+- action:
+    module: ec2_elb_facts
+    names: "{{test}}"
+    region: "{{ region }}"
+  register: elb_facts
+
+- debug:
+    msg: system {{elb_facts.elbs[0].instances_inservice[0]}}
+
+- ec2_instance_facts:
+    instance_ids:
+      - "{{elb_facts.elbs[0].instances_inservice[0]}}"
+  register: ec2_facts
+
+- debug:
+    msg: system {{ec2_facts}}
+
+- name: Snapshot the instance.
+  ec2_snapshot:
+    region: "{{ region }}"
+    instance_id: "{{ item.instance_id }}"
+    device_name: "{{ item.root_device_name }}"
+    wait: no
+    description: "awsbackup snapshot taken on {{ ansible_date_time.date }} at {{ ansible_date_time.time }}"
+    snapshot_tags:
+      Name: "{{role}}_{{ ansible_date_time.date }}_Autoscaling"
+      identifier: Autoscaling
+
+  with_items: "{{ ec2_facts.instances }}"
+  register: snap
+
+- name: Print the snapshot ids
+  debug:
+    msg: "{{ item.snapshot_id }}"
+  with_items: "{{ snap.results }}"
+
+- name: set fact the snapshot id
+  set_fact:
+    snaps_id: "{{ item.snapshot_id  }}"
+  with_items: "{{ snap.results }}"
+
+- ec2_snapshot_facts:
+    filters:
+      snapshot-id: "{{ snaps_id }}"
+  register: a
+  until: a.snapshots.0.state == "completed"
+  retries: 20
+  delay: 40
+
+
+- ec2_ami:
+    region: "{{ region }}"
+    name: "{{ snaps_id }}_{{ ansible_date_time.year }}{{ ansible_date_time.month }}{{ ansible_date_time.day }}{{ansible_date_time.hour }}{{ ansible_date_time.minute }}"
+    state: present
+    architecture: x86_64
+    virtualization_type: hvm
+    root_device_name: /dev/xvda
+    device_mapping:
+      - device_name: /dev/xvda
+        snapshot_id: "{{ snaps_id }}"
+        delete_on_termination: true
+        volume_type: gp2
+    tags:
+      Name: "{{role}}_{{ ansible_date_time.date }}_Autoscaling"
+      identifier: Autoscaling
+      instance: "{{role}}"
+  register: image
+
+- set_fact:
+    configname: "{{role}}{{ ansible_date_time.year }}{{ ansible_date_time.month }}{{ ansible_date_time.day }}{{ansible_date_time.hour }}{{ ansible_date_time.minute }}{{ ansible_date_time.second }}"
+
+- set_fact:
+    ASGname: "{{role}}"
+
+- name: Describe current ASG group
+  shell: aws autoscaling describe-auto-scaling-groups --auto-scaling-group-name {{ASGname}} --query AutoScalingGroups[].LaunchConfigurationName --output text
+  register: ASG
+
+- name: Describe last AMI Register in Current ASG
+  shell: aws autoscaling describe-launch-configurations --launch-configuration-names "{{ ASG.stdout }}"  --query LaunchConfigurations[*].ImageId --output text
+  register: ASG_AMI
+
+- name: Creating New Launch configuration
+  shell:  |
+    aws autoscaling create-launch-configuration --launch-configuration-name {{ configname }}   --image-id {{ image.image_id }} --instance-type t2.micro --key-name SunilTest --security-groups "sg-03add8577aef5bbad"   --user-data file://roles/{{role}}/tasks/userdata.txt
+  register: LaunchConfig
+
+
+- name: Attaching Launch Config to ASG
+  shell: aws autoscaling update-auto-scaling-group --auto-scaling-group-name {{ASGname}} --launch-configuration-name "{{ configname }}"
+
+
+- pause: seconds=12
+
+
+- name: Deleting last Lauch Config {{ ASG.stdout }}
+  shell: aws autoscaling delete-launch-configuration --launch-configuration-name {{ ASG.stdout }}
+
+
+- ec2_ami:
+    region: ap-south-1
+    image_id: "{{ ASG_AMI.stdout }}"
+    delete_snapshot: False
+    state: absent
